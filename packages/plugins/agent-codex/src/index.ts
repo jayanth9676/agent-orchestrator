@@ -19,7 +19,7 @@ import { writeFile, mkdir, readFile, readdir, rename, stat, lstat, open } from "
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
-import { promisify } from "node:util";
+import { promisify, stripVTControlCharacters } from "node:util";
 import { randomBytes } from "node:crypto";
 
 const execFileAsync = promisify(execFile);
@@ -665,8 +665,7 @@ function createCodexAgent(): Agent {
     detectActivity(terminalOutput: string): ActivityState {
       if (!terminalOutput.trim()) return "idle";
 
-      const stripAnsi = (value: string): string =>
-        value.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
+      const stripAnsi = (value: string): string => stripVTControlCharacters(value);
 
       const lines = terminalOutput.trim().split("\n");
       const lastLine = stripAnsi(lines[lines.length - 1] ?? "").trim();
