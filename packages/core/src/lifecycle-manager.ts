@@ -222,13 +222,15 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     }).agentName;
     const agent = registry.get<Agent>("agent", agentName);
     const scm = project.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
+    const runtime = session.runtimeHandle
+      ? registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime)
+      : null;
 
     // Track activity state across steps so stuck detection can run after PR checks
     let detectedIdleTimestamp: Date | null = null;
 
     // 1. Check if runtime is alive
     if (session.runtimeHandle) {
-      const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
       if (runtime) {
         const alive = await runtime.isAlive(session.runtimeHandle).catch(() => true);
         if (!alive) return "killed";
@@ -241,7 +243,33 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         // Try JSONL-based activity detection first (reads agent's session files directly)
         const activityState = await agent.getActivityState(session, config.readyThresholdMs);
         if (activityState) {
-          if (activityState.state === "waiting_input") return "needs_input";
+          if (activityState.state === "waiting_input") {
+            // Detect early needs_input — likely a failed prompt delivery
+            const createdAt = new Date(
+              session.metadata["promptDeliveryAttemptedAt"] ?? session.createdAt,
+            );
+            const ageMs = Date.now() - createdAt.getTime();
+            const promptStatus = session.metadata["promptDeliveryStatus"];
+            const promptAttemptedAt = session.metadata["promptDeliveryAttemptedAt"];
+
+            // Flag as anomaly if session hit needs_input within 2 minutes and prompt wasn't delivered
+            if (promptAttemptedAt && ageMs < 120_000 && promptStatus !== "success") {
+              const anomalyLogEntry = {
+                source: "ao-lifecycle-manager",
+                component: "anomaly-detection",
+                operation: "early-needs-input",
+                outcome: "detected" as const,
+                sessionId: session.id,
+                projectId: session.projectId,
+                reason: `Session entered needs_input within ${Math.round(ageMs / 1000)}s of creation. Likely prompt delivery failure (status: ${promptStatus ?? "unknown"}).`,
+                ageMs,
+                promptDeliveryStatus: promptStatus ?? "unknown",
+                timestamp: new Date().toISOString(),
+              };
+              process.stderr.write(`${JSON.stringify(anomalyLogEntry)}\n`);
+            }
+            return "needs_input";
+          }
           if (activityState.state === "exited") return "killed";
 
           if (
@@ -251,18 +279,58 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             detectedIdleTimestamp = activityState.timestamp;
           }
 
+          // Some agents can surface higher-priority prompt states like
+          // waiting_input only through terminal parsing. Preserve the native
+          // activity probe, but allow recent output to upgrade the session
+          // into needs_input without forcing every agent to encode that state
+          // in getActivityState().
+          if (runtime) {
+            try {
+              const terminalOutput = await runtime.getOutput(session.runtimeHandle, 10);
+              if (terminalOutput) {
+                const activity = agent.detectActivity(terminalOutput);
+                if (activity === "waiting_input") return "needs_input";
+              }
+            } catch {
+              // Output probing is only an upgrade path for waiting_input.
+              // Preserve the native activity result if terminal capture fails.
+            }
+          }
+
           // active/ready/idle (below threshold)/blocked (below threshold) —
           // proceed to PR checks below
         } else {
           // getActivityState returned null — fall back to terminal output parsing
-          const runtime = registry.get<Runtime>(
-            "runtime",
-            project.runtime ?? config.defaults.runtime,
-          );
           const terminalOutput = runtime ? await runtime.getOutput(session.runtimeHandle, 10) : "";
           if (terminalOutput) {
             const activity = agent.detectActivity(terminalOutput);
-            if (activity === "waiting_input") return "needs_input";
+            if (activity === "waiting_input") {
+              // Detect early needs_input via terminal output — likely a failed prompt delivery
+              const createdAt = new Date(
+                session.metadata["promptDeliveryAttemptedAt"] ?? session.createdAt,
+              );
+              const ageMs = Date.now() - createdAt.getTime();
+              const promptStatus = session.metadata["promptDeliveryStatus"];
+              const promptAttemptedAt = session.metadata["promptDeliveryAttemptedAt"];
+
+              if (promptAttemptedAt && ageMs < 120_000 && promptStatus !== "success") {
+                const anomalyLogEntry = {
+                  source: "ao-lifecycle-manager",
+                  component: "anomaly-detection",
+                  operation: "early-needs-input",
+                  outcome: "detected" as const,
+                  sessionId: session.id,
+                  projectId: session.projectId,
+                  reason: `Session entered needs_input within ${Math.round(ageMs / 1000)}s of creation (terminal detection). Likely prompt delivery failure (status: ${promptStatus ?? "unknown"}).`,
+                  ageMs,
+                  promptDeliveryStatus: promptStatus ?? "unknown",
+                  detectionMethod: "terminal",
+                  timestamp: new Date().toISOString(),
+                };
+                process.stderr.write(`${JSON.stringify(anomalyLogEntry)}\n`);
+              }
+              return "needs_input";
+            }
 
             const processAlive = await agent.isProcessRunning(session.runtimeHandle);
             if (!processAlive) return "killed";

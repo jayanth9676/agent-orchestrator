@@ -1073,7 +1073,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
           AO_CALLER_TYPE: "agent",
           AO_PROJECT_ID: spawnConfig.projectId,
           AO_CONFIG_PATH: config.configPath,
-          ...(config.port !== undefined && config.port !== null && { AO_PORT: String(config.port) }),
+          ...(config.port !== undefined &&
+            config.port !== null && { AO_PORT: String(config.port) }),
         },
       });
     } catch (err) {
@@ -1179,15 +1180,96 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     // exits after -p, so we send the prompt after it starts in interactive mode).
     // This is intentionally outside the try/catch above — a prompt delivery failure
     // should NOT destroy the session. The agent is running; user can retry with `ao send`.
+    let promptDeliveryStatus: "success" | "failed" | "pending" = "pending";
     if (plugins.agent.promptDelivery === "post-launch" && agentLaunchConfig.prompt) {
-      try {
-        // Wait for agent to start and be ready for input
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
-        await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
-      } catch {
-        // Non-fatal: agent is running but didn't receive the initial prompt.
-        // User can retry with `ao send`.
+      const retryDelaysMs = [2_000, 4_000, 8_000] as const;
+      const maxAttempts = retryDelaysMs.length;
+      const promptDeliveryAttemptedAt = new Date().toISOString();
+
+      const safeUpdatePromptDeliveryMetadata = (patch: Record<string, string>): void => {
+        try {
+          updateMetadata(sessionsDir, sessionId, patch);
+        } catch (err) {
+          const errorDetails = err instanceof Error ? err.message : String(err);
+          const metadataFailureLogEntry = {
+            source: "ao-session-manager",
+            component: "prompt-delivery",
+            operation: "metadata-update",
+            outcome: "failure" as const,
+            sessionId,
+            projectId: spawnConfig.projectId,
+            reason: `Failed to persist prompt delivery metadata: ${errorDetails}`,
+            timestamp: new Date().toISOString(),
+          };
+          process.stderr.write(`${JSON.stringify(metadataFailureLogEntry)}\n`);
+        }
+      };
+
+      session.metadata["promptDeliveryStatus"] = promptDeliveryStatus;
+      session.metadata["promptDeliveryAttemptedAt"] = promptDeliveryAttemptedAt;
+      safeUpdatePromptDeliveryMetadata({
+        promptDeliveryStatus,
+        promptDeliveryAttemptedAt,
+      });
+
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          const delay = retryDelaysMs[attempt];
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
+
+          promptDeliveryStatus = "success";
+          const successLogEntry = {
+            source: "ao-session-manager",
+            component: "prompt-delivery",
+            operation: "post-launch-prompt",
+            outcome: "success" as const,
+            sessionId,
+            projectId: spawnConfig.projectId,
+            reason: `Initial prompt delivered on attempt ${attempt + 1}`,
+            attempt: attempt + 1,
+            timestamp: new Date().toISOString(),
+          };
+          process.stderr.write(`${JSON.stringify(successLogEntry)}\n`);
+          break;
+        } catch (err) {
+          const errorDetails = err instanceof Error ? err.message : String(err);
+          const failureLogEntry = {
+            source: "ao-session-manager",
+            component: "prompt-delivery",
+            operation: "post-launch-prompt",
+            outcome: "failure" as const,
+            sessionId,
+            projectId: spawnConfig.projectId,
+            reason: `Failed to deliver initial prompt on attempt ${attempt + 1}/${maxAttempts}: ${errorDetails}`,
+            attempt: attempt + 1,
+            maxAttempts,
+            timestamp: new Date().toISOString(),
+          };
+          process.stderr.write(`${JSON.stringify(failureLogEntry)}\n`);
+
+          if (attempt === maxAttempts - 1) {
+            promptDeliveryStatus = "failed";
+            const finalFailureLogEntry = {
+              source: "ao-session-manager",
+              component: "prompt-delivery",
+              operation: "post-launch-prompt",
+              outcome: "failure" as const,
+              sessionId,
+              projectId: spawnConfig.projectId,
+              reason: `All ${maxAttempts} attempts to deliver initial prompt failed. Agent may need manual input via 'ao send'.`,
+              timestamp: new Date().toISOString(),
+            };
+            process.stderr.write(`${JSON.stringify(finalFailureLogEntry)}\n`);
+          }
+        }
       }
+
+      session.metadata["promptDeliveryStatus"] = promptDeliveryStatus;
+      safeUpdatePromptDeliveryMetadata({ promptDeliveryStatus });
+
+      // Non-fatal: agent is running but didn't receive the initial prompt after all retries.
+      // User can retry with `ao send`.
     }
 
     return session;
