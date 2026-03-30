@@ -236,6 +236,20 @@ describe("check (single session)", () => {
     stderrSpy.mockRestore();
   });
 
+  it("does not probe terminal output for active activity state", async () => {
+    vi.mocked(plugins.agent.getActivityState).mockResolvedValue({ state: "active" });
+
+    const lm = setupCheck("app-1", {
+      session: makeSession({ status: "working" }),
+    });
+
+    await lm.check("app-1");
+
+    expect(plugins.runtime.getOutput).not.toHaveBeenCalled();
+    expect(plugins.agent.detectActivity).not.toHaveBeenCalled();
+    expect(lm.getStates().get("app-1")).toBe("working");
+  });
+
   it("logs anomaly when session quickly enters needs_input after failed prompt delivery", async () => {
     vi.mocked(plugins.agent.getActivityState).mockResolvedValue({ state: "waiting_input" });
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);

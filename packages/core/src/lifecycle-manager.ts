@@ -298,7 +298,12 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           // activity probe, but allow recent output to upgrade the session
           // into needs_input without forcing every agent to encode that state
           // in getActivityState().
-          if (runtime) {
+          if (
+            runtime &&
+            (activityState.state === "idle" ||
+              activityState.state === "blocked" ||
+              activityState.state === "ready")
+          ) {
             try {
               const terminalOutput = await runtime.getOutput(session.runtimeHandle, 10);
               if (terminalOutput) {

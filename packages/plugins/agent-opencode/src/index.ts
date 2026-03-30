@@ -17,6 +17,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify, stripVTControlCharacters } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const stripAnsi = (value: string): string => stripVTControlCharacters(value);
 
 interface OpenCodeSessionListEntry {
   id: string;
@@ -239,8 +240,6 @@ function createOpenCodeAgent(): Agent {
 
     detectActivity(terminalOutput: string): ActivityState {
       if (!terminalOutput.trim()) return "idle";
-
-      const stripAnsi = (value: string): string => stripVTControlCharacters(value);
       const tail = terminalOutput.trim().split("\n").slice(-15).map(stripAnsi).join("\n");
 
       if (hasApprovalPrompt(tail)) return "waiting_input";
