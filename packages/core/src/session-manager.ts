@@ -1215,7 +1215,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         try {
           const delay = retryDelaysMs[attempt];
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          await sleep(delay);
           await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
 
           promptDeliveryStatus = "success";

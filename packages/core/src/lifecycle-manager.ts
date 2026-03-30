@@ -209,6 +209,35 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     return idleMs > stuckThresholdMs;
   }
 
+  function maybeLogEarlyNeedsInputAnomaly(
+    session: Session,
+    options?: { detectionMethod?: "activity" | "terminal" },
+  ): void {
+    const promptAttemptedAt = session.metadata["promptDeliveryAttemptedAt"];
+    if (!promptAttemptedAt) return;
+
+    const createdAt = new Date(promptAttemptedAt);
+    const ageMs = Date.now() - createdAt.getTime();
+    const promptStatus = session.metadata["promptDeliveryStatus"];
+    if (ageMs >= 120_000 || promptStatus === "success") return;
+
+    const isTerminalDetection = options?.detectionMethod === "terminal";
+    const anomalyLogEntry = {
+      source: "ao-lifecycle-manager",
+      component: "anomaly-detection",
+      operation: "early-needs-input",
+      outcome: "detected" as const,
+      sessionId: session.id,
+      projectId: session.projectId,
+      reason: `Session entered needs_input within ${Math.round(ageMs / 1000)}s of creation${isTerminalDetection ? " (terminal detection)" : ""}. Likely prompt delivery failure (status: ${promptStatus ?? "unknown"}).`,
+      ageMs,
+      promptDeliveryStatus: promptStatus ?? "unknown",
+      ...(isTerminalDetection ? { detectionMethod: "terminal" as const } : {}),
+      timestamp: new Date().toISOString(),
+    };
+    process.stderr.write(`${JSON.stringify(anomalyLogEntry)}\n`);
+  }
+
   /** Determine current status for a session by polling plugins. */
   async function determineStatus(session: Session): Promise<SessionStatus> {
     const project = config.projects[session.projectId];
@@ -244,30 +273,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         const activityState = await agent.getActivityState(session, config.readyThresholdMs);
         if (activityState) {
           if (activityState.state === "waiting_input") {
-            // Detect early needs_input — likely a failed prompt delivery
-            const createdAt = new Date(
-              session.metadata["promptDeliveryAttemptedAt"] ?? session.createdAt,
-            );
-            const ageMs = Date.now() - createdAt.getTime();
-            const promptStatus = session.metadata["promptDeliveryStatus"];
-            const promptAttemptedAt = session.metadata["promptDeliveryAttemptedAt"];
-
-            // Flag as anomaly if session hit needs_input within 2 minutes and prompt wasn't delivered
-            if (promptAttemptedAt && ageMs < 120_000 && promptStatus !== "success") {
-              const anomalyLogEntry = {
-                source: "ao-lifecycle-manager",
-                component: "anomaly-detection",
-                operation: "early-needs-input",
-                outcome: "detected" as const,
-                sessionId: session.id,
-                projectId: session.projectId,
-                reason: `Session entered needs_input within ${Math.round(ageMs / 1000)}s of creation. Likely prompt delivery failure (status: ${promptStatus ?? "unknown"}).`,
-                ageMs,
-                promptDeliveryStatus: promptStatus ?? "unknown",
-                timestamp: new Date().toISOString(),
-              };
-              process.stderr.write(`${JSON.stringify(anomalyLogEntry)}\n`);
-            }
+            maybeLogEarlyNeedsInputAnomaly(session);
             return "needs_input";
           }
           if (activityState.state === "exited") return "killed";
@@ -305,30 +311,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           if (terminalOutput) {
             const activity = agent.detectActivity(terminalOutput);
             if (activity === "waiting_input") {
-              // Detect early needs_input via terminal output — likely a failed prompt delivery
-              const createdAt = new Date(
-                session.metadata["promptDeliveryAttemptedAt"] ?? session.createdAt,
-              );
-              const ageMs = Date.now() - createdAt.getTime();
-              const promptStatus = session.metadata["promptDeliveryStatus"];
-              const promptAttemptedAt = session.metadata["promptDeliveryAttemptedAt"];
-
-              if (promptAttemptedAt && ageMs < 120_000 && promptStatus !== "success") {
-                const anomalyLogEntry = {
-                  source: "ao-lifecycle-manager",
-                  component: "anomaly-detection",
-                  operation: "early-needs-input",
-                  outcome: "detected" as const,
-                  sessionId: session.id,
-                  projectId: session.projectId,
-                  reason: `Session entered needs_input within ${Math.round(ageMs / 1000)}s of creation (terminal detection). Likely prompt delivery failure (status: ${promptStatus ?? "unknown"}).`,
-                  ageMs,
-                  promptDeliveryStatus: promptStatus ?? "unknown",
-                  detectionMethod: "terminal",
-                  timestamp: new Date().toISOString(),
-                };
-                process.stderr.write(`${JSON.stringify(anomalyLogEntry)}\n`);
-              }
+              maybeLogEarlyNeedsInputAnomaly(session, { detectionMethod: "terminal" });
               return "needs_input";
             }
 
