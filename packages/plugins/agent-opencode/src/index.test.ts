@@ -16,7 +16,13 @@ vi.mock("node:child_process", () => ({
   },
 }));
 
-import { create, manifest, default as defaultExport } from "./index.js";
+import {
+  create,
+  manifest,
+  default as defaultExport,
+  OPENCODE_SESSION_LIST_CACHE_TTL_MS,
+  resetOpenCodeSessionListCache,
+} from "./index.js";
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -72,6 +78,7 @@ function mockTmuxWithProcess(processName: string, found = true) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetOpenCodeSessionListCache();
 });
 
 describe("plugin manifest & exports", () => {
@@ -641,6 +648,101 @@ describe("getActivityState", () => {
     );
 
     expect(state).toBeNull();
+  });
+
+  it("reuses cached opencode session list within TTL", async () => {
+    mockOpencodeSessionList(new Date(Date.now() - 10_000).toISOString());
+
+    await agent.getActivityState(
+      makeSession({
+        runtimeHandle: makeTmuxHandle(),
+        metadata: { opencodeSessionId: "ses_abc123" },
+      }),
+      60_000,
+    );
+    await agent.getActivityState(
+      makeSession({
+        runtimeHandle: makeTmuxHandle(),
+        metadata: { opencodeSessionId: "ses_abc123" },
+      }),
+      60_000,
+    );
+
+    const opencodeCalls = mockExecFileAsync.mock.calls.filter(([cmd]) => cmd === "opencode");
+    expect(opencodeCalls).toHaveLength(1);
+  });
+
+  it("deduplicates in-flight opencode session list requests", async () => {
+    let resolveOpencode: ((value: { stdout: string; stderr: string }) => void) | undefined;
+    const opencodePromise = new Promise<{ stdout: string; stderr: string }>((resolve) => {
+      resolveOpencode = resolve;
+    });
+
+    mockExecFileAsync.mockImplementation((cmd: string) => {
+      if (cmd === "tmux") return Promise.resolve({ stdout: "/dev/ttys003\n", stderr: "" });
+      if (cmd === "ps") {
+        return Promise.resolve({
+          stdout: "  PID TT       ARGS\n  789 ttys003  opencode\n",
+          stderr: "",
+        });
+      }
+      if (cmd === "opencode") return opencodePromise;
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    const first = agent.getActivityState(
+      makeSession({
+        runtimeHandle: makeTmuxHandle(),
+        metadata: { opencodeSessionId: "ses_abc123" },
+      }),
+      60_000,
+    );
+    const second = agent.getActivityState(
+      makeSession({
+        runtimeHandle: makeTmuxHandle(),
+        metadata: { opencodeSessionId: "ses_abc123" },
+      }),
+      60_000,
+    );
+
+    resolveOpencode?.({
+      stdout: JSON.stringify([{ id: "ses_abc123", updated: new Date().toISOString() }]),
+      stderr: "",
+    });
+
+    await Promise.all([first, second]);
+
+    const opencodeCalls = mockExecFileAsync.mock.calls.filter(([cmd]) => cmd === "opencode");
+    expect(opencodeCalls).toHaveLength(1);
+  });
+
+  it("refreshes opencode session list cache after TTL", async () => {
+    const nowSpy = vi.spyOn(Date, "now");
+    let now = Date.UTC(2026, 0, 1, 0, 0, 0);
+    nowSpy.mockImplementation(() => now);
+
+    mockOpencodeSessionList(new Date(now - 10_000).toISOString());
+    await agent.getActivityState(
+      makeSession({
+        runtimeHandle: makeTmuxHandle(),
+        metadata: { opencodeSessionId: "ses_abc123" },
+      }),
+      60_000,
+    );
+
+    now += OPENCODE_SESSION_LIST_CACHE_TTL_MS + 1;
+    await agent.getActivityState(
+      makeSession({
+        runtimeHandle: makeTmuxHandle(),
+        metadata: { opencodeSessionId: "ses_abc123" },
+      }),
+      60_000,
+    );
+
+    const opencodeCalls = mockExecFileAsync.mock.calls.filter(([cmd]) => cmd === "opencode");
+    expect(opencodeCalls).toHaveLength(2);
+
+    nowSpy.mockRestore();
   });
 });
 

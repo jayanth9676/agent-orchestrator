@@ -23,6 +23,20 @@ interface OpenCodeSessionListEntry {
   updated?: string | number;
 }
 
+interface OpenCodeSessionListCache {
+  entries: OpenCodeSessionListEntry[];
+  timestamp: number;
+  promise?: Promise<OpenCodeSessionListEntry[]>;
+}
+
+export const OPENCODE_SESSION_LIST_CACHE_TTL_MS = 5_000;
+
+let sessionListCache: OpenCodeSessionListCache | null = null;
+
+export function resetOpenCodeSessionListCache(): void {
+  sessionListCache = null;
+}
+
 function parseUpdatedTimestamp(updated: string | number | undefined): Date | null {
   if (typeof updated === "number") {
     if (!Number.isFinite(updated)) return null;
@@ -60,6 +74,34 @@ function parseSessionList(raw: string): OpenCodeSessionListEntry[] {
     const record = item as Record<string, unknown>;
     return asValidOpenCodeSessionId(record["id"]) !== undefined;
   });
+}
+
+async function getCachedSessionList(): Promise<OpenCodeSessionListEntry[]> {
+  const now = Date.now();
+  if (sessionListCache && now - sessionListCache.timestamp < OPENCODE_SESSION_LIST_CACHE_TTL_MS) {
+    if (sessionListCache.promise) return sessionListCache.promise;
+    return sessionListCache.entries;
+  }
+
+  const promise = execFileAsync("opencode", ["session", "list", "--format", "json"], {
+    timeout: 30_000,
+  })
+    .then(({ stdout }) => {
+      const entries = parseSessionList(stdout);
+      if (sessionListCache?.promise === promise) {
+        sessionListCache = { entries, timestamp: Date.now() };
+      }
+      return entries;
+    })
+    .catch(() => {
+      if (sessionListCache?.promise === promise) {
+        sessionListCache = null;
+      }
+      return [];
+    });
+
+  sessionListCache = { entries: [], timestamp: now, promise };
+  return promise;
 }
 
 /**
@@ -256,15 +298,7 @@ function createOpenCodeAgent(): Agent {
       if (!running) return { state: "exited", timestamp: exitedAt };
 
       try {
-        const { stdout } = await execFileAsync(
-          "opencode",
-          ["session", "list", "--format", "json"],
-          {
-            timeout: 30_000,
-          },
-        );
-
-        const sessions = parseSessionList(stdout);
+        const sessions = await getCachedSessionList();
         const targetSession =
           (session.metadata?.opencodeSessionId
             ? sessions.find((s) => s.id === session.metadata.opencodeSessionId)
