@@ -30,6 +30,7 @@ interface OpenCodeSessionListCache {
 }
 
 export const OPENCODE_SESSION_LIST_CACHE_TTL_MS = 250;
+const OPENCODE_SESSION_LIST_TIMEOUT_MS = 30_000;
 
 let sessionListCache: OpenCodeSessionListCache | null = null;
 
@@ -90,7 +91,7 @@ async function getCachedSessionList(): Promise<OpenCodeSessionListEntry[]> {
   }
 
   const promise = execFileAsync("opencode", ["session", "list", "--format", "json"], {
-    timeout: 30_000,
+    timeout: OPENCODE_SESSION_LIST_TIMEOUT_MS,
   })
     .then(({ stdout }) => {
       const entries = parseSessionList(stdout);
