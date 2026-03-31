@@ -29,7 +29,7 @@ interface OpenCodeSessionListCache {
   promise?: Promise<OpenCodeSessionListEntry[]>;
 }
 
-export const OPENCODE_SESSION_LIST_CACHE_TTL_MS = 5_000;
+export const OPENCODE_SESSION_LIST_CACHE_TTL_MS = 250;
 
 let sessionListCache: OpenCodeSessionListCache | null = null;
 
