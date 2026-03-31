@@ -78,9 +78,15 @@ function parseSessionList(raw: string): OpenCodeSessionListEntry[] {
 
 async function getCachedSessionList(): Promise<OpenCodeSessionListEntry[]> {
   const now = Date.now();
-  if (sessionListCache && now - sessionListCache.timestamp < OPENCODE_SESSION_LIST_CACHE_TTL_MS) {
-    if (sessionListCache.promise) return sessionListCache.promise;
-    return sessionListCache.entries;
+  if (sessionListCache) {
+    // Always reuse an in-flight promise, regardless of TTL, to dedupe concurrent calls.
+    if (sessionListCache.promise) {
+      return sessionListCache.promise;
+    }
+    // Only apply TTL to already-resolved cached entries.
+    if (now - sessionListCache.timestamp < OPENCODE_SESSION_LIST_CACHE_TTL_MS) {
+      return sessionListCache.entries;
+    }
   }
 
   const promise = execFileAsync("opencode", ["session", "list", "--format", "json"], {
