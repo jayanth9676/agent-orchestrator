@@ -68,3 +68,4 @@ AGENTS.md
 # OS-specific files
 .DS_Store
 Thumbs.db
+.codex/
